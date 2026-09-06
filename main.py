@@ -4,29 +4,38 @@ import subprocess
 import urllib.request
 import urllib.error
 
+def clean_env_var(var_name, default=""):
+    value = os.environ.get(var_name, default).strip()
+    # Remove leading/trailing quotes, brackets, and markdown artifacts
+    value = value.strip('"\'[]()')
+    return value
+
 def run_ffmpeg_telegram():
-    cookie = os.environ.get(
+    cookie = clean_env_var(
         "COOKIE_HEADER", 
         "__hdnea__=st=1788706812~exp=1788728412~acl=/*~hmac=dfa547b2a98b9d919862387cc72700b37df4b3b3d8848315ad8f5c20719b3728"
-    ).strip()
+    )
     
-    cenc_key = os.environ.get(
+    cenc_key = clean_env_var(
         "CENC_KEY", 
         "445450834250887830adbde7c75caa2b"
-    ).strip()
+    )
     
-    mpd_url = os.environ.get(
+    mpd_url = clean_env_var(
         "MPD_URL", 
         "https://jiotvmblive.cdn.jio.com/bpk-tv/Maa_HD_MOB/WDVLive/index.mpd"
-    ).strip()
+    )
     
-    telegram_rtmp = os.environ.get("TELEGRAM_RTMP_URL", "").strip()
+    telegram_rtmp = clean_env_var("TELEGRAM_RTMP_URL")
 
     if not telegram_rtmp:
         print("[!] ERROR: TELEGRAM_RTMP_URL environment variable is missing!")
         sys.exit(1)
 
-    # 1. Check stream accessibility using built-in urllib
+    print(f"[+] Target MPD URL: {mpd_url}")
+    print(f"[+] Target RTMP Endpoint: {telegram_rtmp[:25]}...")
+
+    # 1. Pre-flight URL validation
     print("[+] Checking stream accessibility...")
     req = urllib.request.Request(
         mpd_url,
@@ -40,13 +49,12 @@ def run_ffmpeg_telegram():
             if response.status == 200:
                 print("[+] Stream URL accessible and Cookie verified!")
     except urllib.error.HTTPError as e:
-        print(f"[!] Stream URL rejected request (HTTP {e.code}). Cookie is likely EXPIRED!")
-        print("[!] Please update COOKIE_HEADER in Render settings.")
+        print(f"[!] HTTP Error {e.code}: Check if COOKIE_HEADER has expired.")
         sys.exit(1)
     except Exception as e:
-        print(f"[!] Network error checking MPD URL: {e}")
+        print(f"[!] URL Check Warning: {e}")
 
-    # 2. Format headers for Linux FFmpeg (\r\n trailing line break)
+    # 2. Format headers for Linux FFmpeg
     formatted_headers = f"Cookie: {cookie}\r\n"
 
     cmd = [
