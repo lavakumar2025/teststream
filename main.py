@@ -3,6 +3,24 @@ import sys
 import subprocess
 import urllib.request
 import time
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+# Dummy HTTP handler to satisfy Render's port binding requirement
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def start_health_check_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    print(f"[+] Health check server listening on port {port}")
+    server.serve_forever()
+
+# Start port listener in a separate thread
+threading.Thread(target=start_health_check_server, daemon=True).start()
 
 PROXYSCRAPE_URL = "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text&country=in"
 
@@ -33,7 +51,7 @@ def test_proxy_robust(mpd_url, cookie, proxy):
         proxy_handler = urllib.request.ProxyHandler({'http': proxy, 'https': proxy})
         opener = urllib.request.build_opener(proxy_handler)
         req = urllib.request.Request(mpd_url, headers=headers)
-        with opener.open(req, timeout=6) as res:
+        with opener.open(req, timeout=5) as res:
             if res.status == 200:
                 content = res.read(1024)
                 if b"<MPD" in content or b"xml" in content:
@@ -56,7 +74,7 @@ def run_ffmpeg():
         proxies = fetch_fresh_indian_proxies()
         working_proxy = None
 
-        for proxy in proxies[:20]:
+        for proxy in proxies[:30]:
             print(f"[+] Testing proxy: {proxy}")
             if test_proxy_robust(mpd_url, cookie, proxy):
                 working_proxy = proxy
