@@ -4,6 +4,27 @@ import subprocess
 import urllib.request
 import urllib.error
 import time
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+# Dummy HTTP handler to satisfy Render's port scan check
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Live Streamer Active")
+    
+    def log_message(self, format, *args):
+        return  # Suppress health check logs
+
+def start_health_check_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    print(f"[+] Health check server bound to port {port}")
+    server.serve_forever()
+
+# Start port listener in background thread
+threading.Thread(target=start_health_check_server, daemon=True).start()
 
 PROXYSCRAPE_URL = "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text&country=in"
 
@@ -76,6 +97,8 @@ def run_ffmpeg():
             "-reconnect", "1",
             "-reconnect_streamed", "1",
             "-reconnect_delay_max", "5",
+            "-fflags", "+genpts+discardcorrupt",
+            "-max_delay", "5000000",
             "-http_proxy", working_proxy,
             "-headers", f"Cookie: {cookie}\r\n",
             "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
