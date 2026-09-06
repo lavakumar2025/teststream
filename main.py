@@ -1,151 +1,148 @@
 import os
 import sys
 import subprocess
-import urllib.request
-import urllib.error
+import urllib.parse
 import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+# ==============================================================================
+# 1. RENDER HEALTH CHECK SERVER
+# ==============================================================================
+# Prevents Render from shutting down due to "No open ports detected"
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Live Streamer Active")
-    
+
     def log_message(self, format, *args):
-        return
+        return  # Suppress health check server logs in stdout
 
 def start_health_check_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    print(f"[+] Health check server bound to port {port}")
+    print(f"[+] Health check server listening on port {port}")
     server.serve_forever()
 
+# Start port listener in a background thread
 threading.Thread(target=start_health_check_server, daemon=True).start()
 
-PROXYSCRAPE_URL = "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text&country=in"
-
+# ==============================================================================
+# 2. UTILITY FUNCTIONS
+# ==============================================================================
 def clean_env_var(var_name, default=""):
+    """Clean and strip quotes or brackets from environment variables."""
     value = os.environ.get(var_name, default).strip()
     return value.strip('"\'[]()')
 
-def fetch_fresh_indian_proxies():
-    print("[+] Fetching live Indian proxies from ProxyScrape...")
-    try:
-        req = urllib.request.Request(PROXYSCRAPE_URL, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as res:
-            text = res.read().decode("utf-8")
-            proxies = [p.strip() for p in text.replace("\n", " ").split(" ") if p.strip()]
-            http_proxies = [p for p in proxies if p.startswith("http://") or p.startswith("https://")]
-            print(f"[+] Loaded {len(http_proxies)} HTTP proxies.")
-            return http_proxies
-    except Exception as e:
-        print(f"[!] Proxy fetch failed: {e}")
-        return []
-
-def test_proxy_robust(mpd_url, cookie, proxy):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Cookie": cookie
+def get_cloudflare_proxied_url(target_url, worker_url, cookie):
+    """
+    Wraps the target stream/manifest URL inside the Cloudflare Worker endpoint.
+    Example output: https://my-worker.workers.dev/?url=HTTPS_TARGET&cookie=COOKIES
+    """
+    # Ensure worker URL ends with a slash before adding parameters
+    base_worker = worker_url if worker_url.endswith("/") else f"{worker_url}/"
+    
+    params = {
+        "url": target_url,
+        "cookie": cookie
     }
-    try:
-        proxy_handler = urllib.request.ProxyHandler({'http': proxy, 'https': proxy})
-        opener = urllib.request.build_opener(proxy_handler)
-        req = urllib.request.Request(mpd_url, headers=headers)
-        with opener.open(req, timeout=6) as res:
-            if res.status == 200:
-                content = res.read(1024)
-                if b"<MPD" in content or b"xml" in content:
-                    return True
-    except Exception:
-        pass
-    return False
+    return f"{base_worker}?{urllib.parse.urlencode(params)}"
 
 def get_video_stream_map(quality_setting):
     """
-    Maps quality levels to DASH stream indices:
-    - low: Lowest bitrate track (Index 0 or last depending on MPD structure)
-    - medium: Mid-tier stream
-    - high: Highest resolution / bitrate track
+    Maps quality environment variable levels to stream representation tracks:
+    - low: Stream track index 0
+    - medium: Stream track index 1 (Default)
+    - high: Stream track index 2
     """
     quality = quality_setting.lower()
     
     if quality == "low":
-        # Selects lowest bitrate stream representation
-        print("[+] Stream Quality Set To: LOW")
+        print("[+] Stream Quality Configured: LOW")
         return "0:v:0"
     elif quality == "high":
-        # Selects highest bitrate representation (or highest stream index)
-        print("[+] Stream Quality Set To: HIGH")
+        print("[+] Stream Quality Configured: HIGH")
         return "0:v:2"
     else:
-        # Default to MEDIUM
-        print("[+] Stream Quality Set To: MEDIUM")
+        print("[+] Stream Quality Configured: MEDIUM")
         return "0:v:1"
 
+# ==============================================================================
+# 3. MAIN FFMPEG STREAMING ENGINE
+# ==============================================================================
 def run_ffmpeg():
+    # Fetch Environment Variables
     cookie = clean_env_var("COOKIE_HEADER")
     cenc_key = clean_env_var("CENC_KEY")
     mpd_url = clean_env_var("MPD_URL", "https://jiotvmblive.cdn.jio.com/bpk-tv/Maa_HD_MOB/WDVLive/index.mpd")
     telegram_rtmp = clean_env_var("TELEGRAM_RTMP_URL")
     quality_env = clean_env_var("QUALITY", "medium")
+    worker_url = clean_env_var("WORKER_URL")  # e.g., https://your-worker.workers.dev
 
+    # Validate mandatory parameters
     if not telegram_rtmp:
-        print("[!] TELEGRAM_RTMP_URL missing!")
+        print("[!] ERROR: TELEGRAM_RTMP_URL environment variable is missing!")
+        sys.exit(1)
+
+    if not worker_url:
+        print("[!] ERROR: WORKER_URL environment variable is missing!")
+        print("Please deploy the Cloudflare Worker and set WORKER_URL=https://your-worker.workers.dev")
         sys.exit(1)
 
     video_map = get_video_stream_map(quality_env)
+    
+    # Construct the Cloudflare Worker URL
+    proxied_mpd_url = get_cloudflare_proxied_url(mpd_url, worker_url, cookie)
 
     while True:
-        proxies = fetch_fresh_indian_proxies()
-        working_proxy = None
-
-        for proxy in proxies[:20]:
-            print(f"[+] Testing proxy: {proxy}")
-            if test_proxy_robust(mpd_url, cookie, proxy):
-                working_proxy = proxy
-                print(f"[SUCCESS] Selected Proxy: {proxy}")
-                break
-
-        if not working_proxy:
-            print("[!] No working proxies found. Retrying in 10s...")
-            time.sleep(10)
-            continue
-
         cmd = [
             "ffmpeg",
             "-y",
+            "-loglevel", "info",
+            # Network reconnect & stability flags
             "-reconnect", "1",
             "-reconnect_streamed", "1",
             "-reconnect_delay_max", "5",
+            "-buffer_size", "10240k",
             "-fflags", "+genpts+discardcorrupt",
             "-max_delay", "5000000",
-            "-http_proxy", working_proxy,
-            "-headers", f"Cookie: {cookie}\r\n",
+            # Stream identification & DRM decryption
             "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
             "-cenc_decryption_key", cenc_key,
-            "-i", mpd_url,
+            # Input stream routed through Cloudflare Worker
+            "-i", proxied_mpd_url,
+            # Stream mapping
             "-map", video_map,
             "-map", "0:a:0",
             "-c:v", "copy",
             "-c:a", "copy",
+            # FLV output flags for smooth RTMP ingestion
+            "-flvflags", "no_duration_filesize",
             "-f", "flv",
             telegram_rtmp
         ]
 
-        print(f"[+] Launching stream ({quality_env.upper()}) to Telegram via {working_proxy}...")
+        print(f"[+] Launching Stream via Cloudflare Worker ({quality_env.upper()} Quality)...")
+        print(f"[+] Worker Endpoint: {worker_url}")
         sys.stdout.flush()
 
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        # Run FFmpeg process and stream logs to output
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True
+        )
 
         for line in process.stdout:
             print(line, end="")
             sys.stdout.flush()
 
         process.wait()
-        print("[!] FFmpeg process ended. Rotating proxy in 3 seconds...")
-        time.sleep(3)
+        print("[!] FFmpeg stream connection ended. Restarting stream in 5 seconds...")
+        time.sleep(5)
 
 if __name__ == "__main__":
     run_ffmpeg()
