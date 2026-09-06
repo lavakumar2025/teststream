@@ -2,7 +2,6 @@ import os
 import sys
 import subprocess
 import urllib.request
-import urllib.error
 import time
 
 PROXYSCRAPE_URL = "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text&country=in"
@@ -26,7 +25,6 @@ def fetch_fresh_indian_proxies():
         return []
 
 def test_proxy_robust(mpd_url, cookie, proxy):
-    """Test proxy with MPD and verify response code."""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Cookie": cookie
@@ -76,6 +74,9 @@ def run_ffmpeg():
             "-reconnect", "1",
             "-reconnect_streamed", "1",
             "-reconnect_delay_max", "5",
+            "-http_persistent", "0",
+            "-fflags", "+genpts+discardcorrupt",
+            "-max_delay", "5000000",
             "-http_proxy", working_proxy,
             "-headers", f"Cookie: {cookie}\r\n",
             "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
