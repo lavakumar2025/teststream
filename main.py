@@ -7,7 +7,6 @@ import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# Dummy HTTP handler to satisfy Render's port scan check
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -15,7 +14,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Live Streamer Active")
     
     def log_message(self, format, *args):
-        return  # Suppress health check logs
+        return
 
 def start_health_check_server():
     port = int(os.environ.get("PORT", 8080))
@@ -23,7 +22,6 @@ def start_health_check_server():
     print(f"[+] Health check server bound to port {port}")
     server.serve_forever()
 
-# Start port listener in background thread
 threading.Thread(target=start_health_check_server, daemon=True).start()
 
 PROXYSCRAPE_URL = "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text&country=in"
@@ -47,7 +45,6 @@ def fetch_fresh_indian_proxies():
         return []
 
 def test_proxy_robust(mpd_url, cookie, proxy):
-    """Test proxy with MPD and verify response code."""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Cookie": cookie
@@ -65,15 +62,40 @@ def test_proxy_robust(mpd_url, cookie, proxy):
         pass
     return False
 
+def get_video_stream_map(quality_setting):
+    """
+    Maps quality levels to DASH stream indices:
+    - low: Lowest bitrate track (Index 0 or last depending on MPD structure)
+    - medium: Mid-tier stream
+    - high: Highest resolution / bitrate track
+    """
+    quality = quality_setting.lower()
+    
+    if quality == "low":
+        # Selects lowest bitrate stream representation
+        print("[+] Stream Quality Set To: LOW")
+        return "0:v:0"
+    elif quality == "high":
+        # Selects highest bitrate representation (or highest stream index)
+        print("[+] Stream Quality Set To: HIGH")
+        return "0:v:2"
+    else:
+        # Default to MEDIUM
+        print("[+] Stream Quality Set To: MEDIUM")
+        return "0:v:1"
+
 def run_ffmpeg():
     cookie = clean_env_var("COOKIE_HEADER")
     cenc_key = clean_env_var("CENC_KEY")
     mpd_url = clean_env_var("MPD_URL", "https://jiotvmblive.cdn.jio.com/bpk-tv/Maa_HD_MOB/WDVLive/index.mpd")
     telegram_rtmp = clean_env_var("TELEGRAM_RTMP_URL")
+    quality_env = clean_env_var("QUALITY", "medium")
 
     if not telegram_rtmp:
         print("[!] TELEGRAM_RTMP_URL missing!")
         sys.exit(1)
+
+    video_map = get_video_stream_map(quality_env)
 
     while True:
         proxies = fetch_fresh_indian_proxies()
@@ -104,7 +126,7 @@ def run_ffmpeg():
             "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
             "-cenc_decryption_key", cenc_key,
             "-i", mpd_url,
-            "-map", "0:v:0",
+            "-map", video_map,
             "-map", "0:a:0",
             "-c:v", "copy",
             "-c:a", "copy",
@@ -112,7 +134,7 @@ def run_ffmpeg():
             telegram_rtmp
         ]
 
-        print(f"[+] Launching stream to Telegram via {working_proxy}...")
+        print(f"[+] Launching stream ({quality_env.upper()}) to Telegram via {working_proxy}...")
         sys.stdout.flush()
 
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
