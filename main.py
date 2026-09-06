@@ -1,7 +1,8 @@
 import os
 import sys
 import subprocess
-import requests
+import urllib.request
+import urllib.error
 
 def run_ffmpeg_telegram():
     cookie = os.environ.get(
@@ -25,23 +26,27 @@ def run_ffmpeg_telegram():
         print("[!] ERROR: TELEGRAM_RTMP_URL environment variable is missing!")
         sys.exit(1)
 
-    # 1. Pre-flight check to verify if Cookie is valid
+    # 1. Check stream accessibility using built-in urllib
     print("[+] Checking stream accessibility...")
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Cookie": cookie
-    }
+    req = urllib.request.Request(
+        mpd_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Cookie": cookie
+        }
+    )
     try:
-        res = requests.get(mpd_url, headers=headers, timeout=10)
-        if res.status_code != 200:
-            print(f"[!] Stream URL rejected request (HTTP {res.status_code}). Cookie is likely EXPIRED!")
-            print("[!] Please update COOKIE_HEADER in Render settings.")
-            sys.exit(1)
-        print("[+] Stream URL accessible and Cookie verified!")
+        with urllib.request.urlopen(req, timeout=10) as response:
+            if response.status == 200:
+                print("[+] Stream URL accessible and Cookie verified!")
+    except urllib.error.HTTPError as e:
+        print(f"[!] Stream URL rejected request (HTTP {e.code}). Cookie is likely EXPIRED!")
+        print("[!] Please update COOKIE_HEADER in Render settings.")
+        sys.exit(1)
     except Exception as e:
         print(f"[!] Network error checking MPD URL: {e}")
 
-    # 2. Format headers strictly for Linux FFmpeg (\r\n trailing line break)
+    # 2. Format headers for Linux FFmpeg (\r\n trailing line break)
     formatted_headers = f"Cookie: {cookie}\r\n"
 
     cmd = [
