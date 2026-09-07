@@ -1,16 +1,12 @@
 import os
 import sys
-import json
-import time
 import subprocess
 import urllib.request
 import urllib.error
+import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ==============================================================================
-# 1. RENDER HEALTH CHECK SERVER
-# ==============================================================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -28,82 +24,63 @@ def start_health_check_server():
 
 threading.Thread(target=start_health_check_server, daemon=True).start()
 
-# ==============================================================================
-# 2. PROXY FETCHING & INDIAN GEOLOCATION CHECK (NATIVE URLLIB)
-# ==============================================================================
-PROXIES_JSON_URL = "https://raw.githubusercontent.com/abusaeeidx/TazaProxy-Troxy/refs/heads/main/working_proxies.json"
+PROXYSCRAPE_URL = "https://bykw.short.gy/N6zdOH"
 
 def clean_env_var(var_name, default=""):
     value = os.environ.get(var_name, default).strip()
     return value.strip('"\'[]()')
 
-def fetch_json_proxies():
-    """Fetches and parses the JSON proxy list using standard urllib."""
-    print("[+] Fetching fresh proxy JSON from GitHub...")
+def fetch_fresh_indian_proxies():
+    print("[+] Fetching live Indian proxies from ProxyScrape...")
     try:
-        req = urllib.request.Request(PROXIES_JSON_URL, headers={"User-Agent": "Mozilla/5.0"})
+        req = urllib.request.Request(PROXYSCRAPE_URL, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=10) as res:
-            if res.status == 200:
-                data = json.loads(res.read().decode("utf-8"))
-                print(f"[+] Retrieved {len(data)} total proxies from source.")
-                return data
+            text = res.read().decode("utf-8")
+            proxies = [p.strip() for p in text.replace("\n", " ").split(" ") if p.strip()]
+            http_proxies = [p for p in proxies if p.startswith("http://") or p.startswith("https://")]
+            print(f"[+] Loaded {len(http_proxies)} HTTP proxies.")
+            return http_proxies
     except Exception as e:
-        print(f"[!] Error downloading proxy JSON: {e}")
-    return []
+        print(f"[!] Proxy fetch failed: {e}")
+        return []
 
-def verify_indian_ip(proxy_url):
-    """
-    Checks via ip-api.com if the proxy routes through India (countryCode == 'IN').
-    """
-    geo_url = "http://ip-api.com/json"
+def test_proxy_robust(mpd_url, cookie, proxy):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Cookie": cookie
+    }
     try:
-        proxy_handler = urllib.request.ProxyHandler({'http': proxy_url, 'https': proxy_url})
+        proxy_handler = urllib.request.ProxyHandler({'http': proxy, 'https': proxy})
         opener = urllib.request.build_opener(proxy_handler)
-        req = urllib.request.Request(geo_url, headers={"User-Agent": "Mozilla/5.0"})
-        
-        with opener.open(req, timeout=5) as res:
+        req = urllib.request.Request(mpd_url, headers=headers)
+        with opener.open(req, timeout=6) as res:
             if res.status == 200:
-                geo_data = json.loads(res.read().decode("utf-8"))
-                if geo_data.get("countryCode") == "IN":
-                    print(f"[✓] Verified Indian Proxy: {proxy_url} ({geo_data.get('city', 'India')})")
+                content = res.read(1024)
+                if b"<MPD" in content or b"xml" in content:
                     return True
     except Exception:
         pass
     return False
 
-def get_best_indian_proxy():
-    proxy_entries = fetch_json_proxies()
-    
-    # Filter proxies by latency (< 3500ms)
-    filtered = [p for p in proxy_entries if p.get("latency", 5000) < 3500]
-
-    for entry in filtered[:25]:  # Test first 25 low-latency entries
-        raw_proxy = entry.get("proxy")
-        if not raw_proxy:
-            continue
-        
-        # Ensure proxy protocol format
-        proxy_url = raw_proxy if raw_proxy.startswith("http") else f"http://{raw_proxy}"
-        
-        print(f"[+] Verifying location for: {proxy_url}")
-        if verify_indian_ip(proxy_url):
-            return proxy_url
-
-    print("[!] No responsive Indian proxies found in this cycle.")
-    return None
-
-# ==============================================================================
-# 3. STREAM QUALITY MAPPING & FFMPEG ENGINE
-# ==============================================================================
 def get_video_stream_map(quality_setting):
+    """
+    Maps quality levels to DASH stream indices:
+    - low: Lowest bitrate track (Index 0 or last depending on MPD structure)
+    - medium: Mid-tier stream
+    - high: Highest resolution / bitrate track
+    """
     quality = quality_setting.lower()
+    
     if quality == "low":
+        # Selects lowest bitrate stream representation
         print("[+] Stream Quality Set To: LOW")
         return "0:v:0"
     elif quality == "high":
+        # Selects highest bitrate representation (or highest stream index)
         print("[+] Stream Quality Set To: HIGH")
         return "0:v:2"
     else:
+        # Default to MEDIUM
         print("[+] Stream Quality Set To: MEDIUM")
         return "0:v:1"
 
@@ -115,33 +92,35 @@ def run_ffmpeg():
     quality_env = clean_env_var("QUALITY", "medium")
 
     if not telegram_rtmp:
-        print("[!] ERROR: TELEGRAM_RTMP_URL is missing!")
+        print("[!] TELEGRAM_RTMP_URL missing!")
         sys.exit(1)
 
     video_map = get_video_stream_map(quality_env)
 
     while True:
-        working_proxy = get_best_indian_proxy()
+        proxies = fetch_fresh_indian_proxies()
+        working_proxy = None
+
+        for proxy in proxies[:20]:
+            print(f"[+] Testing proxy: {proxy}")
+            if test_proxy_robust(mpd_url, cookie, proxy):
+                working_proxy = proxy
+                print(f"[SUCCESS] Selected Proxy: {proxy}")
+                break
 
         if not working_proxy:
-            print("[!] No valid Indian proxies available. Retrying in 10s...")
+            print("[!] No working proxies found. Retrying in 10s...")
             time.sleep(10)
             continue
 
         cmd = [
             "ffmpeg",
             "-y",
-            "-loglevel", "warning",
-            # Buffer settings to minimize stutter over public proxies
-            "-buffer_size", "15400k",
-            "-analyseduration", "10000000",
-            "-probesize", "10000000",
-            # Reconnect rules
             "-reconnect", "1",
-            "-reconnect_at_eof", "1",
             "-reconnect_streamed", "1",
-            "-reconnect_delay_max", "3",
-            # Proxy and Headers
+            "-reconnect_delay_max", "5",
+            "-fflags", "+genpts+discardcorrupt",
+            "-max_delay", "5000000",
             "-http_proxy", working_proxy,
             "-headers", f"Cookie: {cookie}\r\n",
             "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -151,27 +130,21 @@ def run_ffmpeg():
             "-map", "0:a:0",
             "-c:v", "copy",
             "-c:a", "copy",
-            "-flvflags", "no_duration_filesize",
             "-f", "flv",
             telegram_rtmp
         ]
 
-        print(f"[+] Launching stream ({quality_env.upper()}) via {working_proxy}...")
+        print(f"[+] Launching stream ({quality_env.upper()}) to Telegram via {working_proxy}...")
         sys.stdout.flush()
 
-        process = subprocess.Popen(
-            cmd, 
-            stdout=subprocess.PIPE, 
-            stderr=subprocess.STDOUT, 
-            universal_newlines=True
-        )
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
 
         for line in process.stdout:
             print(line, end="")
             sys.stdout.flush()
 
         process.wait()
-        print("[!] FFmpeg stream disconnected. Finding a new proxy...")
+        print("[!] FFmpeg process ended. Rotating proxy in 3 seconds...")
         time.sleep(3)
 
 if __name__ == "__main__":
